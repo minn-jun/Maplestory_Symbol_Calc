@@ -43,7 +43,7 @@ python symbolCalc.py
 API 키는 개인 키를 사용해야 하며, 아래와 같이 테스트용으로 입력하시면 됩니다:
 
 ```
-API 키:  ➤  test_8f8b005ac92db1ba204d69055edd91f82d6d31a996a41ca9fa61d113fa4d48e8efe8d04e6d233bd35cf2fabdeb93fb0d
+API 키:  ➤  your_api_key
 ```
 
 ```
