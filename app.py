@@ -132,7 +132,7 @@ class MapleSymbolOptimizer(QMainWindow):
         title_box = QVBoxLayout()
         title = QLabel("심볼 강화 최적화")
         title.setObjectName("title")
-        subtitle = QLabel("최신 API 데이터 기준으로 목표 포스까지 최소 메소 경로를 계산합니다.")
+        subtitle = QLabel("목표 포스까지 최소 비용 강화 경로를 계산합니다.")
         subtitle.setObjectName("subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
