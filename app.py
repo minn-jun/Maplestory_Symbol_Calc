@@ -1,331 +1,757 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
-import threading
-from PIL import ImageTk
+import sys
+from pathlib import Path
 
-import symbol_data as sd
+import requests
+from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QProgressBar,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
 from api_handler import NexonAPI
+from config import NEXON_API_KEY
 from optimizer import find_best_solutions
-from utils import fetch_and_crop_character_image
+from symbol_data import (
+    AREA_ORDER,
+    KEY_TO_NAME_MAP,
+    SYMBOL_AREAS,
+    get_accessible_areas,
+    get_area_key_from_symbol_name,
+    get_areas_for_mode,
+)
 
-class MapleSymbolOptimizer:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("메이플스토리 심볼 최적화 프로그램")
-        self.root.geometry("1000x800")
-        
-        # 변수 설정
-        self.api_key = tk.StringVar()
-        self.character_name = tk.StringVar()
-        self.target_force = tk.IntVar()
-        self.symbol_type = tk.StringVar(value="arcane")
-        
-        # 데이터 및 상태 저장
+
+MODE_LABELS = {
+    "arcane": "아케인포스",
+    "authentic": "어센틱포스",
+}
+
+SYMBOL_ICON_DIR = Path(__file__).resolve().parent / "assets" / "symbols"
+APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / "app_icon.png"
+SYMBOL_ICON_SIZE = 22
+WORLD_ICON_DIR = Path(__file__).resolve().parent / "assets" / "worlds"
+WORLD_ICON_SIZE = 22
+ROUTE_ICON_SIZE = 18
+
+WORLD_ICON_KEYS = {
+    "스카니아": "scania",
+    "베라": "bera",
+    "루나": "luna",
+    "제니스": "zenith",
+    "크로아": "croa",
+    "유니온": "union",
+    "엘리시움": "elysium",
+    "이노시스": "enosis",
+    "레드": "red",
+    "오로라": "aurora",
+    "아케인": "arcane",
+    "노바": "nova",
+    "리부트": "reboot",
+    "리부트2": "reboot",
+    "버닝": "burning",
+}
+
+
+class CharacterLoadWorker(QThread):
+    loaded = Signal(dict, dict, bytes)
+    failed = Signal(str)
+
+    def __init__(self, character_name):
+        super().__init__()
+        self.character_name = character_name
+
+    def run(self):
+        try:
+            api = NexonAPI(NEXON_API_KEY)
+            character_info = api.get_character_info(self.character_name)
+            symbol_info = api.get_symbol_info(self.character_name)
+            image_bytes = self._fetch_image(character_info.get("character_image"))
+            self.loaded.emit(character_info, symbol_info, image_bytes)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def _fetch_image(self, image_url):
+        if not image_url:
+            return b""
+        response = requests.get(image_url, timeout=15)
+        response.raise_for_status()
+        return response.content
+
+
+class MapleSymbolOptimizer(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Maple Symbol Optimizer")
+        if APP_ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
+        self.resize(1180, 780)
+
         self.character_info = {}
         self.symbol_info = {}
-        self.current_force = 0
-        self.api_handler = None
-        
-        self.setup_gui()
-        
-    def setup_gui(self):
-        """애플리케이션의 전체 GUI를 구성합니다."""
-        outer_frame = ttk.Frame(self.root)
-        outer_frame.grid(row=0, column=0, sticky="nsew")
-        self.root.rowconfigure(0, weight=1)
-        self.root.columnconfigure(0, weight=1)
+        self.current_symbols = {}
+        self.worker = None
 
-        canvas = tk.Canvas(outer_frame)
-        canvas.grid(row=0, column=0, sticky="nsew")
+        self._setup_ui()
+        self._apply_style()
+        self._populate_symbol_table()
 
-        scrollbar = ttk.Scrollbar(outer_frame, orient="vertical", command=canvas.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
+    def _setup_ui(self):
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
 
-        outer_frame.rowconfigure(0, weight=1)
-        outer_frame.columnconfigure(0, weight=1)
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(24, 20, 24, 24)
+        layout.setSpacing(16)
 
-        scrollable_frame = ttk.Frame(canvas)
-        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        scrollable_frame.columnconfigure(0, weight=1)
+        layout.addLayout(self._build_header())
+        layout.addWidget(self._build_summary_panel())
+        layout.addWidget(self._build_tabs(), 1)
+        layout.addLayout(self._build_status_bar())
 
-        window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        def _on_canvas_resize(event):
-            canvas.itemconfig(window, width=event.width)
-        canvas.bind("<Configure>", _on_canvas_resize)
+    def _build_header(self):
+        header = QHBoxLayout()
+        header.setSpacing(12)
 
-        main_frame = ttk.Frame(scrollable_frame, padding="10")
-        main_frame.grid(row=0, column=0, sticky="nsew")
-        main_frame.columnconfigure(1, weight=1)
+        title_box = QVBoxLayout()
+        title = QLabel("심볼 강화 최적화")
+        title.setObjectName("title")
+        subtitle = QLabel("최신 API 데이터 기준으로 목표 포스까지 최소 메소 경로를 계산합니다.")
+        subtitle.setObjectName("subtitle")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
 
-        # --- 입력 섹션 ---
-        ttk.Label(main_frame, text="API 키:").grid(row=0, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(main_frame, textvariable=self.api_key, width=50, show="*").grid(row=0, column=1, columnspan=2, sticky=(tk.W, tk.E), pady=2)
-        ttk.Label(main_frame, text="캐릭터명:").grid(row=1, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(main_frame, textvariable=self.character_name, width=30).grid(row=1, column=1, sticky=(tk.W, tk.E), pady=2)
-        ttk.Button(main_frame, text="캐릭터 로드", command=self.load_character).grid(row=1, column=2, padx=(10, 0), pady=2)
+        search_label = QLabel("캐릭터 검색")
+        search_label.setObjectName("fieldLabel")
 
-        # --- 캐릭터 정보 섹션 ---
-        info_frame = ttk.LabelFrame(main_frame, text="캐릭터 정보", padding="10")
-        info_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
-        char_info_frame = ttk.Frame(info_frame)
-        char_info_frame.pack(fill=tk.BOTH, expand=True)
-        self.image_label = ttk.Label(char_info_frame)
-        self.image_label.pack(side=tk.LEFT, padx=(0, 10))
-        self.info_text = scrolledtext.ScrolledText(char_info_frame, height=8, width=60, state='disabled')
-        self.info_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.character_input = QLineEdit()
+        self.character_input.setPlaceholderText("캐릭터명")
+        self.character_input.returnPressed.connect(self.load_character)
 
-        # --- 심볼 정보 섹션 ---
-        symbol_frame = ttk.LabelFrame(main_frame, text="심볼 타입 선택", padding="10")
-        symbol_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
-        ttk.Radiobutton(symbol_frame, text="아케인 심볼", variable=self.symbol_type, value="arcane").pack(side=tk.LEFT, padx=10)
-        ttk.Radiobutton(symbol_frame, text="어센틱 심볼", variable=self.symbol_type, value="authentic").pack(side=tk.LEFT, padx=10)
-        ttk.Button(symbol_frame, text="심볼 정보 로드", command=self.load_symbols).pack(side=tk.LEFT, padx=20)
-        self.symbol_text = scrolledtext.ScrolledText(main_frame, height=8, width=80, state='disabled')
-        self.symbol_text.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.load_button = QPushButton("조회")
+        self.load_button.setObjectName("primaryButton")
+        self.load_button.clicked.connect(self.load_character)
 
-        # --- 목표 설정 섹션 ---
-        target_frame = ttk.LabelFrame(main_frame, text="목표 설정", padding="10")
-        target_frame.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
-        ttk.Label(target_frame, text="목표 포스:").pack(side=tk.LEFT)
-        self.target_force_entry = ttk.Entry(target_frame, textvariable=self.target_force, width=10)
-        self.target_force_entry.pack(side=tk.LEFT, padx=10)
-        ttk.Button(target_frame, text="최적화 계산", command=self.calculate_optimization).pack(side=tk.LEFT, padx=20)
+        header.addLayout(title_box, 1)
+        header.addWidget(search_label)
+        header.addWidget(self.character_input)
+        header.addWidget(self.load_button)
+        return header
 
-        # --- 결과 출력 섹션 ---
-        result_frame = ttk.LabelFrame(main_frame, text="최적화 결과", padding="10")
-        result_frame.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
-        self.result_text = scrolledtext.ScrolledText(result_frame, height=15, width=80, state='disabled')
-        self.result_text.pack(fill=tk.BOTH, expand=True)
+    def _build_summary_panel(self):
+        panel = QFrame()
+        panel.setObjectName("panel")
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(12, 10, 14, 10)
+        layout.setSpacing(14)
 
-        # --- 진행 바 ---
-        self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
-        self.progress.grid(row=7, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        self.character_image = QLabel("No Image")
+        self.character_image.setObjectName("characterImage")
+        self.character_image.setAlignment(Qt.AlignCenter)
+        self.character_image.setFixedSize(106, 106)
 
-    def _update_text_widget(self, widget, content):
-        """ScrolledText 위젯의 내용을 업데이트합니다."""
-        widget.config(state='normal')
-        widget.delete(1.0, tk.END)
-        widget.insert(1.0, content)
-        widget.config(state='disabled')
+        info_grid = QGridLayout()
+        info_grid.setHorizontalSpacing(34)
+        info_grid.setVerticalSpacing(3)
+
+        self.summary_labels = {}
+        fields = [
+            ("character_name", "캐릭터", "-"),
+            ("world_name", "월드", "-"),
+            ("character_guild_name", "길드", "-"),
+            ("character_class", "직업", "-"),
+            ("character_level", "레벨", "-"),
+        ]
+
+        for index, (key, label, default) in enumerate(fields):
+            label_widget = QLabel(label)
+            label_widget.setObjectName("summaryLabel")
+
+            info_grid.addWidget(label_widget, 0, index)
+
+            if key == "world_name":
+                value_widget = QWidget()
+                value_layout = QHBoxLayout(value_widget)
+                value_layout.setContentsMargins(0, 0, 0, 0)
+                value_layout.setSpacing(6)
+
+                self.world_icon_label = QLabel()
+                self.world_icon_label.setFixedSize(WORLD_ICON_SIZE, WORLD_ICON_SIZE)
+                self.world_icon_label.setVisible(False)
+
+                world_label = QLabel(default)
+                world_label.setObjectName("summaryValue")
+                world_label.setMinimumWidth(92)
+
+                value_layout.addWidget(self.world_icon_label)
+                value_layout.addWidget(world_label)
+                value_layout.addStretch(1)
+                self.summary_labels[key] = world_label
+            else:
+                value_widget = QLabel(default)
+                value_widget.setObjectName("summaryValue")
+                value_widget.setMinimumWidth(116)
+                self.summary_labels[key] = value_widget
+
+            info_grid.addWidget(value_widget, 1, index)
+            info_grid.setColumnStretch(index, 1)
+
+        layout.addWidget(self.character_image)
+        layout.addLayout(info_grid, 1)
+        return panel
+
+    def _build_tabs(self):
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_symbol_tab(), "심볼 현황")
+        self.tabs.addTab(self._build_optimizer_tab(), "최적화")
+        return self.tabs
+
+    def _build_optimizer_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 18, 14, 8)
+        layout.setSpacing(14)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 14)
+        controls.setSpacing(12)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem(MODE_LABELS["arcane"], "arcane")
+        self.mode_combo.addItem(MODE_LABELS["authentic"], "authentic")
+        self.mode_combo.currentIndexChanged.connect(self.refresh_mode_view)
+
+        self.current_force_input = QLineEdit()
+        self.current_force_input.setReadOnly(True)
+        self.current_force_input.setText("0")
+        self.current_force_input.setObjectName("readonlyInput")
+
+        self.target_force_input = QLineEdit()
+        self.target_force_input.setPlaceholderText("목표 포스")
+        self.target_force_input.returnPressed.connect(self.calculate_optimization)
+
+        self.calculate_button = QPushButton("계산")
+        self.calculate_button.setObjectName("primaryButton")
+        self.calculate_button.clicked.connect(self.calculate_optimization)
+
+        controls.addWidget(QLabel("계산 대상"))
+        controls.addWidget(self.mode_combo)
+        controls.addWidget(QLabel("현재 포스"))
+        controls.addWidget(self.current_force_input)
+        controls.addWidget(QLabel("목표 포스"))
+        controls.addWidget(self.target_force_input)
+        controls.addStretch(1)
+        controls.addWidget(self.calculate_button)
+
+        self.result_table = QTableWidget(0, 4)
+        self.result_table.setHorizontalHeaderLabels(["순위", "증가 포스", "추천 경로", "총 비용"])
+        self.result_table.verticalHeader().setVisible(False)
+        self.result_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.result_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.result_table.setColumnWidth(0, 72)
+        self.result_table.setColumnWidth(1, 104)
+        self.result_table.setColumnWidth(3, 142)
+        self.result_table.verticalHeader().setDefaultSectionSize(36)
+        self.result_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.result_table.setMinimumHeight(420)
+        self.result_table.setAlternatingRowColors(True)
+        self.result_table.setSelectionBehavior(QTableWidget.SelectRows)
+
+        layout.addLayout(controls)
+        layout.addWidget(self.result_table, 1)
+        return page
+
+    def _build_symbol_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 18, 14, 8)
+        layout.setSpacing(14)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 12)
+        controls.setSpacing(12)
+        self.symbol_mode_combo = QComboBox()
+        self.symbol_mode_combo.addItem(MODE_LABELS["arcane"], "arcane")
+        self.symbol_mode_combo.addItem(MODE_LABELS["authentic"], "authentic")
+        self.symbol_mode_combo.currentIndexChanged.connect(self._populate_symbol_table)
+        controls.addWidget(QLabel("조회 대상"))
+        controls.addWidget(self.symbol_mode_combo)
+        controls.addStretch(1)
+
+        self.symbol_table = QTableWidget(0, 5)
+        self.symbol_table.setHorizontalHeaderLabels(["지역", "요구 레벨", "현재 레벨", "현재 포스", "최대 포스"])
+        self.symbol_table.verticalHeader().setVisible(False)
+        self.symbol_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.symbol_table.verticalHeader().setDefaultSectionSize(36)
+        self.symbol_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.symbol_table.setMinimumHeight(380)
+        self.symbol_table.setAlternatingRowColors(True)
+
+        layout.addLayout(controls)
+        layout.addWidget(self.symbol_table)
+        return page
+
+    def _build_status_bar(self):
+        row = QHBoxLayout()
+        self.status_label = QLabel("캐릭터명을 입력하고 조회를 누르세요.")
+        self.status_label.setObjectName("statusLabel")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(False)
+        self.progress.setFixedWidth(180)
+        row.addWidget(self.status_label, 1)
+        row.addWidget(self.progress)
+        return row
 
     def load_character(self):
-        """캐릭터 정보 로드를 시작합니다."""
-        if not self.api_key.get() or not self.character_name.get():
-            messagebox.showerror("오류", "API 키와 캐릭터명을 입력해주세요.")
+        character_name = self.character_input.text().strip()
+        if not character_name:
+            QMessageBox.warning(self, "입력 필요", "캐릭터명을 입력해주세요.")
             return
 
-        # 이전 심볼 정보 초기화
-        self._update_text_widget(self.symbol_text, "")
-        self.symbol_info = {}
-        
-        # 이전 최적화 결과창 초기화
-        self._update_text_widget(self.result_text, "")
-        
-        # 목표 포스 입력창 초기화
-        self.target_force.set("")
-        
-        # 심볼 타입 기본값으로 설정
-        self.symbol_type.set("arcane")
-        
-        self.api_handler = NexonAPI(self.api_key.get())
-        threading.Thread(target=self._load_character_thread, daemon=True).start()
+        self._set_loading(True, "최신 캐릭터/심볼 데이터를 조회하는 중입니다.")
+        self.worker = CharacterLoadWorker(character_name)
+        self.worker.loaded.connect(self._on_character_loaded)
+        self.worker.failed.connect(self._on_load_failed)
+        self.worker.finished.connect(lambda: self._set_loading(False))
+        self.worker.start()
 
-    def _load_character_thread(self):
-        """백그라운드에서 캐릭터 정보를 로드합니다."""
-        try:
-            self.progress.start()
-            char_name = self.character_name.get()
-            
-            # API를 통해 기본 정보 및 이미지 URL 가져오기
-            self.character_info = self.api_handler.get_character_info(char_name)
-            
-            # 이미지 로드 및 크롭
-            image_url = self.character_info.get('character_image')
-            self.character_image = fetch_and_crop_character_image(image_url) if image_url else None
-            
-            self.root.after(0, self.update_character_info_gui)
-        except Exception as e:
-            # [FIXED] 람다에 e=e를 추가하여 예외 객체를 캡처합니다.
-            self.root.after(0, lambda e=e: messagebox.showerror("오류", f"캐릭터 로드 실패: {e}"))
-        finally:
-            self.root.after(0, self.progress.stop)
-            
-    def update_character_info_gui(self):
-        """가져온 캐릭터 정보로 GUI를 업데이트합니다."""
-        if self.character_image:
-            self.image_label.configure(image=self.character_image)
-        else:
-            self.image_label.configure(text="이미지 없음", image="")
-        
+    def _on_character_loaded(self, character_info, symbol_info, image_bytes):
+        self.character_info = character_info
+        self.symbol_info = symbol_info
+        self.current_symbols = self._parse_current_symbols(symbol_info)
+        self._update_character_summary(image_bytes)
+        self._reset_after_character_load()
+        self.status_label.setText("최신 데이터 조회가 완료되었습니다.")
+
+    def _on_load_failed(self, message):
+        QMessageBox.critical(self, "조회 실패", message)
+        self.status_label.setText("조회에 실패했습니다.")
+
+    def _set_loading(self, is_loading, message=None):
+        self.progress.setVisible(is_loading)
+        self.load_button.setEnabled(not is_loading)
+        self.calculate_button.setEnabled(not is_loading)
+        if message:
+            self.status_label.setText(message)
+
+    def _parse_current_symbols(self, symbol_info):
+        parsed = {}
+        for symbol in symbol_info.get("symbol", []):
+            area_key = get_area_key_from_symbol_name(symbol.get("symbol_name", ""))
+            if not area_key:
+                continue
+            parsed[area_key] = {
+                "level": int(symbol.get("symbol_level") or 0),
+                "force": int(symbol.get("symbol_force") or 0),
+                "name": symbol.get("symbol_name", ""),
+            }
+        return parsed
+
+    def _update_character_summary(self, image_bytes):
         info = self.character_info
-        text = (
-            f"캐릭터명: {info.get('character_name', 'N/A')}\n"
-            f"월드명: {info.get('world_name', 'N/A')}\n"
-            f"클래스: {info.get('character_class', 'N/A')}\n"
-            f"레벨: {info.get('character_level', 'N/A')}\n"
-            f"길드명: {info.get('character_guild_name') or '길드 없음'}\n"
-            f"전직: {info.get('character_class_level', 'N/A')}차 전직 완료\n"
-            f"경험치: {info.get('character_exp_rate', 'N/A')}%"
-        )
-        self._update_text_widget(self.info_text, text)
+        values = {
+            "character_name": info.get("character_name", "-"),
+            "world_name": info.get("world_name", "-"),
+            "character_guild_name": info.get("character_guild_name") or "길드 없음",
+            "character_class": info.get("character_class", "-"),
+            "character_level": self._format_level_text(info),
+        }
+        for key, value in values.items():
+            self.summary_labels[key].setText(value)
+        self._update_world_icon(values["world_name"])
 
-    def load_symbols(self):
-        """심볼 정보 로드를 시작합니다."""
-        if not self.character_info:
-            messagebox.showerror("오류", "먼저 캐릭터를 로드해주세요.")
-            return
-        threading.Thread(target=self._load_symbols_thread, daemon=True).start()
-        
-    def _load_symbols_thread(self):
-        """백그라운드에서 심볼 정보를 로드합니다."""
-        try:
-            self.progress.start()
-            self.symbol_info = self.api_handler.get_symbol_info(self.character_name.get())
-            self.root.after(0, self.update_symbol_info_gui)
-        except Exception as e:
-            # [FIXED] 람다에 e=e를 추가하여 예외 객체를 캡처합니다.
-            self.root.after(0, lambda e=e: messagebox.showerror("오류", f"심볼 로드 실패: {e}"))
-        finally:
-            self.root.after(0, self.progress.stop)
-
-    def update_symbol_info_gui(self):
-        """가져온 심볼 정보로 GUI를 업데이트합니다."""
-        symbol_text = ""
-        total_force = 0
-        
-        is_arcane = self.symbol_type.get() == "arcane"
-        symbol_title = "아케인" if is_arcane else "어센틱"
-        symbol_names_map = sd.ARCANE_SYMBOLS_NAMES if is_arcane else sd.AUTHENTIC_SYMBOLS_NAMES
-
-        symbol_text += f"=== {symbol_title} 심볼 정보 ===\n\n"
-        
-        if self.symbol_info and 'symbol' in self.symbol_info:
-            for symbol in self.symbol_info['symbol']:
-                s_name = symbol.get('symbol_name', '')
-                if any(key in s_name for key in symbol_names_map):
-                    symbol_text += f"{s_name}: Lv.{symbol['symbol_level']} (포스 +{symbol['symbol_force']})\n"
-                    total_force += int(symbol['symbol_force'])
-            
-            self.current_force = total_force
-            symbol_text += f"\n{symbol_title} 포스 : {total_force}\n"
+        pixmap = QPixmap()
+        if image_bytes and pixmap.loadFromData(image_bytes):
+            cropped = pixmap.copy(105, 115, 90, 90) if pixmap.width() >= 195 and pixmap.height() >= 205 else pixmap
+            self.character_image.setPixmap(cropped.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            symbol_text += "심볼 정보를 찾을 수 없습니다.\n"
-        
-        self._update_text_widget(self.symbol_text, symbol_text)
+            self.character_image.setText("No Image")
+            self.character_image.setPixmap(QPixmap())
+
+    def _update_world_icon(self, world_name):
+        icon_key = self._world_icon_key(world_name)
+        icon_path = self._find_icon_path(WORLD_ICON_DIR, icon_key)
+        if not icon_path:
+            self.world_icon_label.setVisible(False)
+            self.world_icon_label.setPixmap(QPixmap())
+            return
+
+        pixmap = QPixmap(str(icon_path))
+        if pixmap.isNull():
+            self.world_icon_label.setVisible(False)
+            self.world_icon_label.setPixmap(QPixmap())
+            return
+
+        self.world_icon_label.setPixmap(pixmap.scaled(
+            WORLD_ICON_SIZE,
+            WORLD_ICON_SIZE,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        ))
+        self.world_icon_label.setVisible(True)
+
+    def _world_icon_key(self, world_name):
+        if not world_name:
+            return None
+        if world_name.startswith("챌린저스"):
+            return "challengers"
+        return WORLD_ICON_KEYS.get(world_name)
+
+    def _find_icon_path(self, directory, icon_key):
+        if not icon_key:
+            return None
+        for extension in (".webp", ".png"):
+            path = directory / f"{icon_key}{extension}"
+            if path.exists():
+                return path
+        return None
+
+    def _format_level_text(self, info):
+        level = info.get("character_level", "-")
+        exp_rate = info.get("character_exp_rate")
+        if exp_rate is None:
+            return f"Lv. {level}"
+        return f"Lv. {level} ({exp_rate}%)"
+
+    def refresh_mode_view(self):
+        self.target_force_input.clear()
+        self._update_current_force_label()
+        self._populate_symbol_table()
+        self.result_table.setRowCount(0)
+
+    def _reset_after_character_load(self):
+        self.mode_combo.blockSignals(True)
+        self.symbol_mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(0)
+        self.symbol_mode_combo.setCurrentIndex(0)
+        self.mode_combo.blockSignals(False)
+        self.symbol_mode_combo.blockSignals(False)
+
+        self.target_force_input.clear()
+        self.result_table.setRowCount(0)
+        self._update_current_force_label()
+        self._populate_symbol_table()
+        self.tabs.setCurrentIndex(0)
+
+    def _update_current_force_label(self):
+        self.current_force_input.setText(str(self._current_force_for_mode(self._current_mode())))
+
+    def _current_mode(self):
+        return self.mode_combo.currentData()
+
+    def _character_level(self):
+        return int(self.character_info.get("character_level") or 0)
+
+    def _current_force_for_mode(self, mode):
+        character_level = self._character_level()
+        if character_level:
+            area_keys = set(get_accessible_areas(character_level, mode))
+        else:
+            area_keys = {area.key for area in get_areas_for_mode(mode)}
+        return sum(
+            int(symbol.get("force") or 0)
+            for key, symbol in self.current_symbols.items()
+            if key in area_keys
+        )
+
+    def _populate_symbol_table(self):
+        mode = self.symbol_mode_combo.currentData()
+        character_level = self._character_level()
+        if character_level:
+            accessible_area_keys = set(get_accessible_areas(character_level, mode))
+            areas = [area for area in get_areas_for_mode(mode) if area.key in accessible_area_keys]
+        else:
+            areas = get_areas_for_mode(mode)
+        self.symbol_table.setRowCount(len(areas) + 1)
+        total_current_force = 0
+        total_max_force = 0
+
+        for row, area in enumerate(areas):
+            current = self.current_symbols.get(area.key, {})
+            current_force = int(current.get("force", 0) or 0)
+            total_current_force += current_force
+            total_max_force += area.max_force
+            values = [
+                area.name,
+                str(area.required_level),
+                str(current.get("level", 0)),
+                str(current_force),
+                str(area.max_force),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem("" if col == 0 else value)
+                if col != 0:
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.symbol_table.setItem(row, col, item)
+            self.symbol_table.setCellWidget(row, 0, self._symbol_name_widget(area.key, area.name))
+
+        total_row = len(areas)
+        total_values = ["합계", "-", "-", str(total_current_force), str(total_max_force)]
+        for col, value in enumerate(total_values):
+            item = QTableWidgetItem("" if col == 0 else value)
+            if col != 0:
+                item.setTextAlignment(Qt.AlignCenter)
+            item.setBackground(QColor("#1f3f34"))
+            self.symbol_table.setItem(total_row, col, item)
+        total_icon_key = "select_arcane" if mode == "arcane" else "select_authentic"
+        self.symbol_table.setCellWidget(total_row, 0, self._symbol_name_widget(total_icon_key, "합계", is_total=True))
+
+    def _symbol_name_widget(self, icon_key, text, is_total=False):
+        widget = QWidget()
+        if is_total:
+            widget.setObjectName("totalNameCell")
+
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(10, 0, 8, 0)
+        layout.setSpacing(8)
+
+        icon_label = QLabel()
+        icon_label.setFixedSize(SYMBOL_ICON_SIZE, SYMBOL_ICON_SIZE)
+        icon_path = self._find_icon_path(SYMBOL_ICON_DIR, icon_key)
+        pixmap = QPixmap(str(icon_path)) if icon_path else QPixmap()
+        if not pixmap.isNull():
+            icon_label.setPixmap(pixmap.scaled(
+                SYMBOL_ICON_SIZE,
+                SYMBOL_ICON_SIZE,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            ))
+
+        text_label = QLabel(text)
+        text_label.setObjectName("symbolTotalText" if is_total else "symbolNameText")
+
+        layout.addWidget(icon_label)
+        layout.addWidget(text_label)
+        layout.addStretch(1)
+        return widget
+
+    def _route_widget(self, steps, is_best=False):
+        widget = QWidget()
+        widget.setObjectName("bestRouteCell" if is_best else "routeCell")
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(5)
+
+        sorted_steps = sorted(steps, key=lambda step: AREA_ORDER.index(step.area))
+        if not sorted_steps:
+            empty_label = QLabel("-")
+            empty_label.setObjectName("routeText")
+            layout.addWidget(empty_label)
+            layout.addStretch(1)
+            return widget
+
+        for index, step in enumerate(sorted_steps):
+            if index:
+                comma_label = QLabel(",")
+                comma_label.setObjectName("routeText")
+                layout.addWidget(comma_label)
+
+            icon_label = QLabel()
+            icon_label.setFixedSize(ROUTE_ICON_SIZE, ROUTE_ICON_SIZE)
+            icon_path = self._find_icon_path(SYMBOL_ICON_DIR, step.area)
+            pixmap = QPixmap(str(icon_path)) if icon_path else QPixmap()
+            if not pixmap.isNull():
+                icon_label.setPixmap(pixmap.scaled(
+                    ROUTE_ICON_SIZE,
+                    ROUTE_ICON_SIZE,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                ))
+
+            text_label = QLabel(f"{KEY_TO_NAME_MAP[step.area]} {step.current_level}->{step.target_level}")
+            text_label.setObjectName("routeText")
+            layout.addWidget(icon_label)
+            layout.addWidget(text_label)
+
+        layout.addStretch(1)
+        return widget
 
     def calculate_optimization(self):
-        """최적화 계산을 시작하기 전 유효성을 검사합니다."""
-        if not self.symbol_info:
-            messagebox.showerror("오류", "심볼 정보를 로드해주세요.")
+        if not self.character_info or not self.symbol_info:
+            QMessageBox.warning(self, "조회 필요", "먼저 캐릭터 정보를 조회해주세요.")
             return
 
-        target_force_str = self.target_force_entry.get()
-        if not target_force_str:
-            messagebox.showerror("오류", "목표 포스를 입력해주세요.")
-            return
-        
         try:
-            target_force_val = int(target_force_str)
-            self.target_force.set(target_force_val)
+            target_force = int(self.target_force_input.text().strip())
         except ValueError:
-            messagebox.showerror("오류", "목표 포스는 숫자로 입력해주세요.")
+            QMessageBox.warning(self, "입력 오류", "목표 포스는 숫자로 입력해주세요.")
             return
-            
-        threading.Thread(target=self._calculate_optimization_thread, daemon=True).start()
 
-    def _calculate_optimization_thread(self):
-        """백그라운드에서 최적화 계산을 수행합니다."""
-        try:
-            self.progress.start()
-            
-            is_arcane = self.symbol_type.get() == "arcane"
-            character_level = self.character_info.get('character_level', 200)
-            
-            accessible_areas = self._get_accessible_areas(character_level)
-            
-            # 현재 심볼 정보 파싱
-            current_symbols = {}
-            symbol_set = sd.ARCANE_SYMBOLS_SET if is_arcane else sd.AUTHENTIC_SYMBOLS_SET
-            
-            for symbol in self.symbol_info.get('symbol', []):
-                s_name = symbol['symbol_name'].replace("아케인심볼 : ", "").replace("어센틱심볼 : ", "")
-                if s_name in symbol_set:
-                    area_key = sd.NAME_TO_KEY_MAP.get(s_name)
-                    if area_key in accessible_areas:
-                        current_symbols[area_key] = {
-                            "level": symbol['symbol_level'],
-                            "force": symbol['symbol_force']
-                        }
-            
-            target_force = self.target_force.get()
+        mode = self._current_mode()
+        character_level = self._character_level()
+        accessible_areas = get_accessible_areas(character_level, mode)
+        current_force = self._current_force_for_mode(mode)
+        max_force = sum(SYMBOL_AREAS[area_key].max_force for area_key in accessible_areas)
 
-            if self.current_force >= target_force:
-                self.root.after(0, lambda: messagebox.showinfo("알림", "이미 목표 포스에 도달했습니다!"))
-                return
-            
-            max_force = len(accessible_areas) * (220 if is_arcane else 110)
-            if target_force > max_force:
-                self.root.after(0, lambda: messagebox.showwarning("경고", f"목표 포스가 최댓값({max_force})을 초과했습니다."))
-                return
+        if target_force <= current_force:
+            QMessageBox.information(self, "계산 불필요", "이미 목표 포스에 도달했습니다.")
+            return
+        if target_force > max_force:
+            QMessageBox.warning(self, "목표 초과", f"현재 레벨 기준 최대 포스는 {max_force}입니다.")
+            return
 
-            needed_force = target_force - self.current_force
-            
-            if (target_force != max_force) and needed_force > 200:
-                proceed = messagebox.askyesno(
-                    "계산량 경고",
-                    f"필요 포스가 {needed_force}로 매우 큽니다.\n"
-                    f"계산량이 많아 정확한 값이 안나올 수 있습니다.\n\n"
-                    f"실행하시겠습니까?\n(권장: 목표 포스를 단계별로 나누어 계산)"
-                )
-                if not proceed: return
-            
-            # 최적화 알고리즘 실행
-            best_solutions = find_best_solutions(current_symbols, accessible_areas, needed_force, is_arcane)
-            
-            # 결과 포맷팅 및 GUI 업데이트
-            result_text = self._format_results(best_solutions, self.current_force, target_force, is_arcane)
-            self.root.after(0, lambda: self._update_text_widget(self.result_text, result_text))
-            
-        except Exception as e:
-            self.root.after(0, lambda e=e: messagebox.showerror("오류", f"계산 실패: {e}"))
-        finally:
-            self.root.after(0, self.progress.stop)
+        needed_force = target_force - current_force
+        results = find_best_solutions(self.current_symbols, accessible_areas, needed_force)
+        self._populate_results(results, current_force, target_force)
 
-    def _get_accessible_areas(self, character_level):
-        """캐릭터 레벨에 따라 접근 가능한 지역 목록을 반환합니다."""
-        accessible = []
-        level_reqs = sd.ARCANE_LEVEL_REQS if self.symbol_type.get() == "arcane" else sd.AUTHENTIC_LEVEL_REQS
-        
-        for level, area in level_reqs.items():
-            if character_level >= level:
-                accessible.append(area)
-        return accessible
+    def _populate_results(self, results, current_force, target_force):
+        self.result_table.setRowCount(len(results))
+        needed_force = target_force - current_force
 
-    def _format_results(self, solutions, current_force, target_force, is_arcane):
-        """계산 결과를 사용자가 보기 쉬운 문자열로 변환합니다."""
-        if not solutions:
-            return "오류: 목표 포스에 도달할 수 있는 조합이 없습니다."
-        
-        num_results = len(solutions)
-        result = (
-            f"현재 포스: {current_force}\n"
-            f"목표 포스: {target_force}\n"
-            f"필요 포스: {target_force - current_force}\n\n"
-            f"=== 최적화 결과 (비용 기준 오름차순 상위 {num_results}개) ===\n\n"
+        for row, result in enumerate(results):
+            values = [
+                str(row + 1),
+                f"+{needed_force}",
+                "",
+                f"{result.total_cost:,}",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col != 2:
+                    item.setTextAlignment(Qt.AlignCenter)
+                if row == 0:
+                    item.setBackground(QColor("#1f3f34"))
+                self.result_table.setItem(row, col, item)
+            self.result_table.setCellWidget(row, 2, self._route_widget(result.steps, row == 0))
+
+        self.status_label.setText(f"최소 비용 경로 {len(results)}개를 계산했습니다.")
+
+    def _apply_style(self):
+        QApplication.instance().setFont(QFont("Malgun Gothic", 10))
+        self.setStyleSheet(
+            """
+            #root { background: #111418; color: #e8edf2; }
+            QLabel { color: #e8edf2; }
+            #title { font-size: 28px; font-weight: 700; }
+            #subtitle, #statusLabel, #summaryLabel, #fieldLabel { color: #9aa7b4; }
+            #fieldLabel { font-weight: 600; }
+            #summaryValue { color: #ffffff; font-size: 16px; font-weight: 700; }
+            #symbolNameText {
+                color: #e8edf2;
+                font-weight: 600;
+            }
+            QWidget {
+                background: transparent;
+            }
+            #symbolTotalText {
+                color: #ffffff;
+                font-weight: 700;
+            }
+            #totalNameCell {
+                background: #1f3f34;
+            }
+            #routeText {
+                color: #e8edf2;
+                font-weight: 600;
+            }
+            #bestRouteCell {
+                background: #1f3f34;
+            }
+            QLineEdit#readonlyInput {
+                color: #b8c3cf;
+                background: #131820;
+            }
+            #panel {
+                background: #1a2027;
+                border: 1px solid #2a3440;
+                border-radius: 8px;
+            }
+            #characterImage {
+                background: #111820;
+                border: 1px solid #2a3440;
+                border-radius: 8px;
+                color: #65717e;
+            }
+            QLineEdit, QComboBox {
+                background: #171d24;
+                color: #edf3f8;
+                border: 1px solid #2c3845;
+                border-radius: 6px;
+                padding: 8px 10px;
+                min-width: 160px;
+            }
+            QComboBox { min-width: 190px; }
+            QLineEdit { min-width: 170px; }
+            QPushButton {
+                background: #26313d;
+                color: #edf3f8;
+                border: 1px solid #3a4654;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+            }
+            QPushButton#primaryButton {
+                background: #2f7d5d;
+                border-color: #3e9b75;
+            }
+            QPushButton:disabled { color: #65717e; background: #1d252d; }
+            QTabWidget::pane {
+                border: 1px solid #2a3440;
+                border-radius: 0px;
+                background: #151a20;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #202832;
+                color: #aab6c2;
+                padding: 10px 28px;
+                border: 1px solid #2a3440;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 3px;
+            }
+            QTabBar::tab:selected {
+                background: #2f7d5d;
+                color: #ffffff;
+                border-color: #2f7d5d;
+            }
+            QTableWidget {
+                background: #151a20;
+                alternate-background-color: #1a2027;
+                color: #e8edf2;
+                gridline-color: #2a3440;
+                border: none;
+            }
+            QHeaderView::section {
+                background: #202832;
+                color: #d8e0e8;
+                border: none;
+                border-right: 1px solid #2a3440;
+                padding: 8px;
+                font-weight: 700;
+            }
+            QProgressBar {
+                border: 1px solid #2a3440;
+                border-radius: 5px;
+                background: #151a20;
+                height: 10px;
+            }
+            QProgressBar::chunk { background: #2f7d5d; border-radius: 4px; }
+            """
         )
-        
-        sort_order = sd.ARCANE_SORT_ORDER if is_arcane else sd.AUTHENTIC_SORT_ORDER
-        
-        for i, (upgrade_plan, total_cost, added_force) in enumerate(solutions, 1):
-            result += f"[방법 {i}] 총 비용: {total_cost:,} 메소, 추가 포스: +{added_force}\n"
 
-            sorted_plan_items = sorted(upgrade_plan.items(), key=lambda item: sort_order.index(item[0]))
-            
-            for area, (current, target, cost) in sorted_plan_items:
-                area_name = sd.KEY_TO_NAME_MAP.get(area, area)
-                result += f"  {area_name}: Lv.{current} → Lv.{target} (비용: {cost:,} 메소)\n"
-            result += "\n"
-        
-        return result
+
+def run_app():
+    app = QApplication(sys.argv)
+    if APP_ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
+    window = MapleSymbolOptimizer()
+    window.show()
+    sys.exit(app.exec())
