@@ -42,10 +42,15 @@ MODE_LABELS = {
     "authentic": "어센틱포스",
 }
 
-SYMBOL_ICON_DIR = Path(__file__).resolve().parent / "assets" / "symbols"
-APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / "app_icon.png"
+def resource_path(*parts):
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base_dir.joinpath(*parts)
+
+
+SYMBOL_ICON_DIR = resource_path("assets", "symbols")
+APP_ICON_PATH = resource_path("assets", "app_icon.png")
 SYMBOL_ICON_SIZE = 22
-WORLD_ICON_DIR = Path(__file__).resolve().parent / "assets" / "worlds"
+WORLD_ICON_DIR = resource_path("assets", "worlds")
 WORLD_ICON_SIZE = 22
 ROUTE_ICON_SIZE = 18
 

@@ -1,2 +1,7 @@
 __pycache__/
 .env
+build/
+dist/
+*.log
+build_tools/*.log
+build_tools/__pycache__/
