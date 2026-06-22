@@ -1,4 +1,3 @@
-from bisect import bisect_left
 from dataclasses import dataclass
 from itertools import product
 
@@ -89,20 +88,15 @@ def _result_key(result):
     return result.total_cost, result.added_force, result.upgrade_count, _steps_key(result.steps)
 
 
-def _build_suffix_best(combinations, top_n):
+def _build_best_by_force(combinations, top_n):
     by_force = {}
     for combo in combinations:
         by_force.setdefault(combo[0], []).append(combo)
 
-    forces = sorted(by_force)
-    suffix_best = [None] * len(forces)
-    best = []
-
-    for index in range(len(forces) - 1, -1, -1):
-        best = sorted(best + by_force[forces[index]], key=_combo_key)[:top_n]
-        suffix_best[index] = best
-
-    return forces, suffix_best
+    return {
+        force: sorted(force_combinations, key=_combo_key)[:top_n]
+        for force, force_combinations in by_force.items()
+    }
 
 
 def find_best_solutions(current_symbols, accessible_areas, needed_force, top_n=TOP_N_SOLUTIONS):
@@ -115,19 +109,18 @@ def find_best_solutions(current_symbols, accessible_areas, needed_force, top_n=T
 
     middle = len(options_by_area) // 2
     left = _combine_options(options_by_area[:middle])
-    right_forces, right_suffix_best = _build_suffix_best(
+    right_by_force = _build_best_by_force(
         _combine_options(options_by_area[middle:]),
         top_n,
     )
 
     candidates = []
     for left_force, left_cost, left_steps in left:
-        min_right_force = needed_force - left_force
-        right_index = bisect_left(right_forces, max(0, min_right_force))
-        if right_index >= len(right_forces):
+        required_right_force = needed_force - left_force
+        if required_right_force < 0:
             continue
 
-        for right_force, right_cost, right_steps in right_suffix_best[right_index]:
+        for right_force, right_cost, right_steps in right_by_force.get(required_right_force, []):
             candidates.append(OptimizationResult(
                 steps=tuple(sorted(left_steps + right_steps, key=lambda step: step.area)),
                 total_cost=left_cost + right_cost,

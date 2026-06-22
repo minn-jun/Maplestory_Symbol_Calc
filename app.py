@@ -617,12 +617,11 @@ class MapleSymbolOptimizer(QMainWindow):
 
     def _populate_results(self, results, current_force, target_force):
         self.result_table.setRowCount(len(results))
-        needed_force = target_force - current_force
 
         for row, result in enumerate(results):
             values = [
                 str(row + 1),
-                f"+{needed_force}",
+                f"+{result.added_force}",
                 "",
                 f"{result.total_cost:,}",
             ]

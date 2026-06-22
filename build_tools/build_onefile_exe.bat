@@ -2,7 +2,8 @@
 setlocal
 
 cd /d "%~dp0.."
-taskkill /IM MapleSymbolOptimizer.exe /F >nul 2>nul
+powershell -NoProfile -Command "Get-Process MapleSymbolOptimizer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"
+ping 127.0.0.1 -n 2 >nul
 if exist dist\MapleSymbolOptimizer.exe del /F /Q dist\MapleSymbolOptimizer.exe
 python -m PyInstaller --clean --noconfirm build_tools\MapleSymbolOptimizer-onefile.spec
 if errorlevel 1 (
